@@ -1,15 +1,22 @@
 """
     Main training code. Loads data, builds the model, trains, tests, evaluates, writes outputs, etc.
 """
+import os 
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import torch.optim as optim
 from torch.autograd import Variable
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from allennlp.modules.elmo import Elmo, batch_to_ids
 
 import csv
 import argparse
 import os 
 import numpy as np
+import pandas as pd
 import operator
 import random
 import sys
@@ -24,6 +31,30 @@ import interpret
 import persistence
 import learn.models as models
 import learn.tools as tools
+
+class ELMoDataset(Dataset):
+    def __init__(self, data_path, dicts, num_labels):
+        self.data = pd.read_csv(data_path)
+        self.dicts = dicts
+        self.num_labels = num_labels
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data.iloc[len(self.data) - (idx + 1)]
+        tokens = item.TEXT.split()[:MAX_LENGTH]
+        print('----')
+        print(tokens)
+        print(self.dicts['w2ind'])
+        input_ = list(map(lambda x: self.dicts['w2ind'][x], tokens))
+        print(input_)
+        print('====')
+        labels = np.zeros(self.num_labels)
+        for l in item.LABELS.split(';'):
+            code = int(self.dicts['c2ind'][l])
+            labels[code] = 1
+        return input_, labels, None, [], []
 
 def main(args):
     start = time.time()
@@ -47,7 +78,7 @@ def init(args):
     print(model)
 
     if not args.test_model:
-        optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
+        optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), weight_decay=args.weight_decay, lr=args.lr)
     else:
         optimizer = None
 
@@ -69,7 +100,7 @@ def train_epochs(args, model, optimizer, params, dicts):
     for epoch in range(args.n_epochs):
         #only test on train/test set on very last epoch
         if epoch == 0 and not args.test_model:
-            model_dir = os.path.join(MODEL_DIR, '_'.join([args.model, time.strftime('%b_%d_%H:%M', time.localtime())]))
+            model_dir = os.path.join(MODEL_DIR, '_'.join([args.model, time.strftime('%b_%d_%H:%M:%S_%f', time.localtime())]))
             os.mkdir(model_dir)
         elif args.test_model:
             model_dir = os.path.dirname(os.path.abspath(args.test_model))
@@ -159,7 +190,6 @@ def one_epoch(model, optimizer, Y, epoch, n_epochs, batch_size, data_path, versi
     metrics_all = (metrics, metrics_te, metrics_tr)
     return metrics_all
 
-
 def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet):
     """
         Training loop.
@@ -174,11 +204,17 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
 
     ind2w, w2ind, ind2c, c2ind = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind']
     unseen_code_inds = set(ind2c.keys())
-    desc_embed = model.lmbda > 0
-
+    # desc_embed = model.lmbda > 0
+    desc_embed = False
     model.train()
     gen = datasets.data_generator(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
-    for batch_idx, tup in tqdm(enumerate(gen)):
+    generator = gen
+    
+    # dataset = ELMoDataset(data_path, dicts, num_labels)
+    # data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=1)
+    # generator = data_loader
+
+    for batch_idx, tup in tqdm(enumerate(generator)):
         data, target, _, code_set, descs = tup
         data, target = Variable(torch.LongTensor(data)), Variable(torch.FloatTensor(target))
         unseen_code_inds = unseen_code_inds.difference(code_set)
@@ -191,10 +227,20 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
             desc_data = descs
         else:
             desc_data = None
-
+        print('---------')
+        print(max(list(ind2w.keys())))
+        print(min(list(ind2w.keys())))
+        # print(data)
+        print(data.size())
+        
+        print(data.max())
+        print(data.min())
+        print('---------')
         output, loss, _ = model(data, target, desc_data=desc_data)
 
-        loss.backward()
+        # print("Outside: input size", data.size(), "output_size", output.size())
+
+        loss.sum().backward()
         optimizer.step()
 
         losses.append(loss.data[0])
@@ -241,6 +287,7 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
 
     model.eval()
     gen = datasets.data_generator(filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
+    
     for batch_idx, tup in tqdm(enumerate(gen)):
         data, target, hadm_ids, _, descs = tup
         data, target = Variable(torch.LongTensor(data), volatile=True), Variable(torch.FloatTensor(target))
@@ -296,7 +343,7 @@ if __name__ == "__main__":
                         help="path to a file containing sorted train data. dev/test splits assumed to have same name format with 'train' replaced by 'dev' and 'test'")
     parser.add_argument("vocab", type=str, help="path to a file holding vocab word list for discretizing words")
     parser.add_argument("Y", type=str, help="size of label space")
-    parser.add_argument("model", type=str, choices=["cnn_vanilla", "rnn", "conv_attn", "multi_conv_attn", "saved"], help="model")
+    parser.add_argument("model", type=str, choices=["cnn_vanilla", "tcn", "rnn", "conv_attn", "multi_conv_attn", "saved"], help="model")
     parser.add_argument("n_epochs", type=int, help="number of epochs to train")
     parser.add_argument("--embed-file", type=str, required=False, dest="embed_file",
                         help="path to a file holding pre-trained embeddings")
@@ -308,6 +355,8 @@ if __name__ == "__main__":
                         help="optional flag for rnn to use a bidirectional model")
     parser.add_argument("--rnn-layers", type=int, required=False, dest="rnn_layers", default=1,
                         help="number of layers for RNN models (default: 1)")
+    parser.add_argument("--tcn-layers", type=int, required=False, dest="tcn_layers", default=1,
+                        help="number of layers for TCN models (default: 1)")
     parser.add_argument("--embed-size", type=int, required=False, dest="embed_size", default=100,
                         help="size of embedding dimension. (default: 100)")
     parser.add_argument("--filter-size", type=str, required=False, dest="filter_size", default=4,

@@ -7,6 +7,10 @@ import torch.nn.functional as F
 from torch.nn.init import xavier_uniform
 from torch.autograd import Variable
 
+from allennlp.modules.elmo import Elmo, batch_to_ids
+from allennlp.commands.elmo import ElmoEmbedder
+from pytorch_pretrained_bert import BertTokenizer, BertModel, BertForMaskedLM
+
 import numpy as np
 
 from math import floor
@@ -19,7 +23,7 @@ from dataproc import extract_wvs
 
 class BaseModel(nn.Module):
 
-    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=True, embed_size=100):
+    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=True, embed_size=128):
         super(BaseModel, self).__init__()
         torch.manual_seed(1337)
         self.gpu = gpu
@@ -91,7 +95,7 @@ class BaseModel(nn.Module):
 
 class ConvAttnPool(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=100, dropout=0.5):
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=64, dropout=0.5):
         super(ConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
 
         #initialize conv layer as in 2.1
@@ -136,7 +140,7 @@ class ConvAttnPool(BaseModel):
         
         if desc_data is not None:
             #run descriptions through description module
-            b_batch = self.embed_descriptions(desc_data, self.gpu)
+            b_batch = self.f(desc_data, self.gpu)
             #get l2 similarity loss
             diffs = self._compare_label_embeddings(target, b_batch, desc_data)
         else:
@@ -150,7 +154,7 @@ class ConvAttnPool(BaseModel):
 
 class VanillaConv(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=100, dropout=0.5):
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=64, dropout=0.5):
         super(VanillaConv, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size) 
         #initialize conv layer as in 2.1
         self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size)
@@ -161,13 +165,17 @@ class VanillaConv(BaseModel):
         xavier_uniform(self.fc.weight)
 
     def forward(self, x, target, desc_data=None, get_attention=False):
+        print('=====')
+        print(x.shape)
         #embed
         x = self.embed(x)
         x = self.embed_drop(x)
         x = x.transpose(1, 2)
+        print(x.shape)
 
         #conv/max-pooling
         c = self.conv(x)
+        print(c.shape)
         if get_attention:
             #get argmax vector too
             x, argmax = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2], return_indices=True)
@@ -175,11 +183,12 @@ class VanillaConv(BaseModel):
         else:
             x = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2])
             attn = None
+        print(x.shape)
         x = x.squeeze(dim=2)
-
+        print(x.shape)
         #linear output
         x = self.fc(x)
-
+        print(x.shape)
         #final sigmoid to get predictions
         yhat = x
         loss = self._get_loss(yhat, target)
@@ -208,13 +217,12 @@ class VanillaConv(BaseModel):
         attn_full = attn_full.transpose(1,2)
         return attn_full
 
-
 class VanillaRNN(BaseModel):
     """
         General RNN - can be LSTM or GRU, uni/bi-directional
     """
 
-    def __init__(self, Y, embed_file, dicts, rnn_dim, cell_type, num_layers, gpu, embed_size=100, bidirectional=False):
+    def __init__(self, Y, embed_file, dicts, rnn_dim, cell_type, num_layers, gpu, embed_size=64, bidirectional=False):
         super(VanillaRNN, self).__init__(Y, embed_file, dicts, embed_size=embed_size, gpu=gpu)
         self.gpu = gpu
         self.rnn_dim = rnn_dim
@@ -272,3 +280,159 @@ class VanillaRNN(BaseModel):
     def refresh(self, batch_size):
         self.batch_size = batch_size
         self.hidden = self.init_hidden()
+
+        
+        
+####### manuyavuz ######
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.utils import weight_norm
+
+
+class Chomp1d(nn.Module):
+    def __init__(self, chomp_size):
+        super(Chomp1d, self).__init__()
+        self.chomp_size = chomp_size
+
+    def forward(self, x):
+        return x[:, :, :-self.chomp_size].contiguous()
+
+
+class TemporalBlock(nn.Module):
+    def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2):
+        super(TemporalBlock, self).__init__()
+        self.conv1 = weight_norm(nn.Conv1d(n_inputs, n_outputs, kernel_size,
+                                           stride=stride, padding=padding, dilation=dilation))
+        self.chomp1 = Chomp1d(padding)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout)
+
+        self.conv2 = weight_norm(nn.Conv1d(n_outputs, n_outputs, kernel_size,
+                                           stride=stride, padding=padding, dilation=dilation))
+        self.chomp2 = Chomp1d(padding)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout)
+
+        self.net = nn.Sequential(self.conv1, self.chomp1, self.relu1, self.dropout1,
+                                 self.conv2, self.chomp2, self.relu2, self.dropout2)
+        self.downsample = nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
+        self.relu = nn.ReLU()
+        self.init_weights()
+
+    def init_weights(self):
+        self.conv1.weight.data.normal_(0, 0.01)
+        self.conv2.weight.data.normal_(0, 0.01)
+        if self.downsample is not None:
+            self.downsample.weight.data.normal_(0, 0.01)
+
+    def forward(self, x):
+        out = self.net(x)
+        res = x if self.downsample is None else self.downsample(x)
+        return self.relu(out + res)
+
+
+class TemporalConvNet(nn.Module):
+    def __init__(self, num_inputs, num_channels, kernel_size=2, dropout=0.2):
+        super(TemporalConvNet, self).__init__()
+        layers = []
+        num_levels = len(num_channels)
+        print(num_channels)
+        print(num_levels)
+        for i in range(num_levels):
+            dilation_size = 2 ** i
+            in_channels = num_inputs if i == 0 else num_channels[i-1]
+            out_channels = num_channels[i]
+            layers += [TemporalBlock(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
+                                     padding=(kernel_size-1) * dilation_size, dropout=dropout)]
+
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.network(x)
+    
+class VanillaTCN(BaseModel):
+
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, num_layers, gpu=True, dicts=None, embed_size=64, dropout=0.5):
+        super(VanillaTCN, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size)
+        # torch.backends.cudnn.enabled = False
+        options_file = "/home/lily/zl379/Playing/bilm-tf/mmc_new/options.json"
+        weight_file = "/home/lily/zl379/Playing/bilm-tf/dump/weights.hdf5"
+        bert_folder = "/data/corpora/BioBERT/pubmed_pmc_470k"
+
+        # Compute two different representation for each token.
+        # Each representation is a linear weighted combination for the
+        # 3 layers in ELMo (i.e., charcnn, the outputs of the two BiLSTM))
+        # self.elmo_embedder = ElmoEmbedder(options_file, weight_file)
+        vocab = list(dicts['w2ind'].keys())
+        print(len(vocab))
+        self.elmo = Elmo(options_file, weight_file, 2, dropout=0.5)
+        # self.elmo = Elmo(options_file, weight_file, 2, dropout=0.5, vocab_to_cache=vocab, requires_grad=False)
+        # self.bert = BertForPreTraining.from_pretrained(bert_folder, cache_dir=None)
+
+        num_channels = [num_filter_maps] * num_layers
+        self.tcn = TemporalConvNet(self.embed_size, num_channels, kernel_size=kernel_size, dropout=dropout)
+#         xavier_uniform(self.tcn.weight)
+        self.linear = nn.Linear(num_filter_maps, Y)
+        self.linear_elmo = nn.Linear(self.embed_size, Y)
+        xavier_uniform(self.linear_elmo.weight)
+        xavier_uniform(self.linear.weight)
+
+    def forward(self, x, target, desc_data=None, get_attention=False):
+        # print("\tIn Model: input size", x.size())
+        #embed
+        print('=====')
+        print(x)
+        print(x.size())
+        x = self.elmo(x, x)['elmo_representations'][-1]
+        x = x.transpose(1, 2)
+
+        # x = self.embed(x)
+        # x = self.embed_drop(x)
+        # x = x.transpose(1, 2)
+        # print(x.shape)
+
+        tc = x
+        # tc = self.tcn(x)  # input should have dimension (N, C, L)
+#         print(tc.shape)
+
+        x = F.max_pool1d(F.tanh(tc), kernel_size=tc.size()[2])
+        x = x.squeeze(dim=2)
+        # x = tc[:,:,-1]
+        # print(x.shape)
+#         print(x.shape)
+        # o = self.linear(x)
+        o = self.linear_elmo(x)
+        # print(o.shape)
+
+        
+        yhat = o
+        loss = self._get_loss(yhat, target)
+#         return F.log_softmax(o, dim=1), loss
+        # print("\tIn Model: output size", yhat.size())
+        return yhat, loss, None
+
+    def construct_attention(self, argmax, num_windows):
+        attn_batches = []
+        for argmax_i in argmax:
+            attns = []
+            for i in range(num_windows):
+                #generate mask to select indices of conv features where max was i
+                mask = (argmax_i == i).repeat(1,self.Y).t()
+                #apply mask to every label's weight vector and take the sum to get the 'attention' score
+                weights = self.fc.weight[mask].view(-1,self.Y)
+                if len(weights.size()) > 0:
+                    window_attns = weights.sum(dim=0)
+                    attns.append(window_attns)
+                else:
+                    #this window was never a max
+                    attns.append(Variable(torch.zeros(self.Y)).cuda())
+            #combine
+            attn = torch.stack(attns)
+            attn_batches.append(attn)
+        attn_full = torch.stack(attn_batches)
+        #put it in the right form for passing to interpret
+        attn_full = attn_full.transpose(1,2)
+        return attn_full
+

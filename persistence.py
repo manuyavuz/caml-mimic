@@ -10,13 +10,24 @@ import torch
 from constants import *
 from learn import models
 
+class MyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        else:
+            return super(MyEncoder, self).default(obj)
+
 def save_metrics(metrics_hist_all, model_dir):
     with open(model_dir + "/metrics.json", 'w') as metrics_file:
         #concatenate dev, train metrics into one dict
         data = metrics_hist_all[0].copy()
         data.update({"%s_te" % (name):val for (name,val) in metrics_hist_all[1].items()})
         data.update({"%s_tr" % (name):val for (name,val) in metrics_hist_all[2].items()})
-        json.dump(data, metrics_file, indent=1)
+        json.dump(data, metrics_file, indent=1, cls=MyEncoder)
 
 def save_params_dict(params):
     with open(params["model_dir"] + "/params.json", 'w') as params_file:
