@@ -11,6 +11,7 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from allennlp.modules.elmo import Elmo, batch_to_ids
+from pytorch_pretrained_bert import BertTokenizer, BertModel, BertForMaskedLM
 
 import csv
 import argparse
@@ -32,6 +33,46 @@ import persistence
 import learn.models as models
 import learn.tools as tools
 
+def get_data_loader(data_path, dicts, batch_size, num_labels, version=None, desc_embed=None, embedding=None):
+    if embedding == 'bert':
+        dataset = BERTDataset(data_path, dicts, num_labels)
+        return DataLoader(dataset, batch_size=batch_size, num_workers=1, collate_fn=collate_fn)
+    else:
+        return datasets.data_generator(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
+
+def collate_fn(data):
+    def merge(sequences):
+        lengths = [len(seq) for seq in sequences]
+        padded_seqs = np.zeros((len(sequences), max(lengths)))
+        for i, seq in enumerate(sequences):
+            end = lengths[i]
+            padded_seqs[i, :end] = seq[:end]
+        return padded_seqs, lengths
+
+    # sort a list by sequence length (descending order) to use pack_padded_sequence
+    # data.sort(key=lambda x: len(x[1]), reverse=True)
+    # seperate source and target sequences
+    # src_seqs, trg_seqs, ind_seqs, src_plain, tgt_plain = zip(*data)
+    # src_seqs, src_lengths = merge(src_seqs)
+    # trg_seqs, trg_lengths = merge(trg_seqs)
+    # ind_seqs, _ = merge(ind_seqs)
+    input_, labels, x1, x2, x3 = zip(*data)
+    input_, _ = merge(input_)
+    
+    # src_seqs = torch.tensor(src_seqs).transpose(0,1).long()
+    # trg_seqs = torch.tensor(trg_seqs).transpose(0,1).long()
+    # ind_seqs = torch.tensor(ind_seqs).transpose(0,1).long()
+    # src_lengths = torch.tensor(src_lengths).long()
+    # trg_lengths = torch.tensor(trg_lengths).long()
+
+    #if torch.cuda.is_available():
+    #    src_seqs = src_seqs.cuda()
+    #    trg_seqs = trg_seqs.cuda()
+    #    ind_seqs = ind_seqs.cuda()
+    #    src_lengths = src_lengths.cuda()
+    #    trg_lengths = trg_lengths.cuda()
+    return input_, labels, x1, x2, x3
+
 class ELMoDataset(Dataset):
     def __init__(self, data_path, dicts, num_labels):
         self.data = pd.read_csv(data_path)
@@ -44,17 +85,67 @@ class ELMoDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data.iloc[len(self.data) - (idx + 1)]
         tokens = item.TEXT.split()[:MAX_LENGTH]
-        print('----')
-        print(tokens)
-        print(self.dicts['w2ind'])
         input_ = list(map(lambda x: self.dicts['w2ind'][x], tokens))
-        print(input_)
-        print('====')
         labels = np.zeros(self.num_labels)
         for l in item.LABELS.split(';'):
             code = int(self.dicts['c2ind'][l])
             labels[code] = 1
         return input_, labels, None, [], []
+
+class BERTDataset(Dataset):
+    def __init__(self, data_path, dicts, num_labels):
+        self.data = pd.read_csv(data_path)
+        self.dicts = dicts
+        self.num_labels = num_labels
+        bert_vocab_file = "/data/corpora/mimic/experiments/pytorch-pretrained-BERT/pubmed_pmc_470k"
+        self.bert_tokenizer = BertTokenizer.from_pretrained(bert_vocab_file)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data.iloc[idx]
+        truncated_text = ' '.join(item.TEXT.split()[:MAX_LENGTH])
+        truncated_text = f'[CLS] {truncated_text} [SEP]'
+        
+        token_ids = self.bert_tokenizer.convert_tokens_to_ids(self.bert_tokenizer.tokenize(truncated_text))
+# # Load pre-trained model tokenizer (vocabulary)
+# BERT_TOKENIZER = BertTokenizer.from_pretrained('pubmed_pmc_470k/')
+# # Tokenized input
+# TOKENIZED_TEXT = [bert_tokenizer.tokenize(T) for  T in TEXT]
+# # Convert token to vocabulary indices
+# # The convention in BERT is:
+# # (a) For sequence pairs:
+# #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
+# #  type_ids:   0   0  0    0    0     0      0   0    1  1  1   1  1   1
+# # (b) For single sequences:
+# #  tokens:   [CLS] the dog is hairy . [SEP]
+# #  type_ids:   0   0   0   0  0     0   0
+# INDEXED_TOKENS = [BERT_TOKENIZER.convert_tokens_to_ids(TOKENIZED_TEXT_CUR) for TOKENIZED_TEXT_CUR in TOKENIZED_TEXT]
+# original_lens = [len(toks) for toks in INDEXED_TOKENS]
+# max_len = max(original_lens)
+# ind2 = []
+# for toks in INDEXED_TOKENS:
+#     toks = toks + [0]*(max_len - len(toks))
+#     ind2.append(toks)
+# INDEXED_TOKENS = ind2
+# #INDEXED_TOKENS = torch.nn.utils.rnn.pad_sequence(INDEXED_TOKENS, batch_first=True)
+
+# # Define sentence A and B indices associated to 1st and 2nd sentences (see paper)
+# #input_type_ids = [[0] * len(INDEXED_TOKENS[0]) for i in range(150)]
+# # The mask has 1 for real tokens and 0 for padding tokens. Only real
+# # tokens are attended to.
+# #input_mask = [[1] * len(INDEXED_TOKENS[0]) for i in range(150)]
+
+# # Convert inputs to PyTorch tensors
+# TOKENS_TENSOR = torch.tensor(INDEXED_TOKENS)   # pylint: disable=E1102
+
+        input_ = token_ids
+        labels = np.zeros(self.num_labels)
+        for l in item.LABELS.split(';'):
+            code = int(self.dicts['c2ind'][l])
+            labels[code] = 1
+        return input_, labels, 0, [], []
 
 def main(args):
     start = time.time()
@@ -207,17 +298,12 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
     # desc_embed = model.lmbda > 0
     desc_embed = False
     model.train()
-    gen = datasets.data_generator(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
-    generator = gen
-    
-    # dataset = ELMoDataset(data_path, dicts, num_labels)
-    # data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=1)
-    # generator = data_loader
-
+    generator = get_data_loader(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed, embedding=args.embedding)
     for batch_idx, tup in tqdm(enumerate(generator)):
         data, target, _, code_set, descs = tup
         data, target = Variable(torch.LongTensor(data)), Variable(torch.FloatTensor(target))
-        unseen_code_inds = unseen_code_inds.difference(code_set)
+        # code_set = set(code_set)
+        # unseen_code_inds = unseen_code_inds.difference(code_set)
         if gpu:
             data = data.cuda()
             target = target.cuda()
@@ -227,23 +313,17 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
             desc_data = descs
         else:
             desc_data = None
-        print('---------')
-        print(max(list(ind2w.keys())))
-        print(min(list(ind2w.keys())))
-        # print(data)
-        print(data.size())
-        
-        print(data.max())
-        print(data.min())
-        print('---------')
         output, loss, _ = model(data, target, desc_data=desc_data)
 
         # print("Outside: input size", data.size(), "output_size", output.size())
 
         loss.sum().backward()
+        
+        if args.grad_clipping != -1:
+            torch.nn.utils.clip_grad_norm(model.parameters(), args.grad_clipping)
         optimizer.step()
 
-        losses.append(loss.data[0])
+        losses.append(loss.sum().data.item())
 
         if not quiet and batch_idx % print_every == 0:
             #print the average loss of the last 10 batches
@@ -286,9 +366,9 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
         unseen_code_vecs(model, code_inds, dicts, gpu)
 
     model.eval()
-    gen = datasets.data_generator(filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
+    generator = get_data_loader(filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed, embedding=args.embedding)
     
-    for batch_idx, tup in tqdm(enumerate(gen)):
+    for batch_idx, tup in tqdm(enumerate(generator)):
         data, target, hadm_ids, _, descs = tup
         data, target = Variable(torch.LongTensor(data), volatile=True), Variable(torch.FloatTensor(target))
         if gpu:
@@ -307,7 +387,7 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
 
         output = F.sigmoid(output)
         output = output.data.cpu().numpy()
-        losses.append(loss.data[0])
+        losses.append(loss.data.item())
         target_data = target.data.cpu().numpy()
         if get_attn and samples:
             interpret.save_samples(data, output, target_data, alpha, window_size, epoch, tp_file, fp_file, dicts=dicts)
@@ -345,6 +425,9 @@ if __name__ == "__main__":
     parser.add_argument("Y", type=str, help="size of label space")
     parser.add_argument("model", type=str, choices=["cnn_vanilla", "tcn", "rnn", "conv_attn", "multi_conv_attn", "saved"], help="model")
     parser.add_argument("n_epochs", type=int, help="number of epochs to train")
+    parser.add_argument("--embedding", type=str, choices=["default", "elmo", "bert"], dest="embedding", default='default',
+                        help="embedding model to be used")
+
     parser.add_argument("--embed-file", type=str, required=False, dest="embed_file",
                         help="path to a file holding pre-trained embeddings")
     parser.add_argument("--cell-type", type=str, choices=["lstm", "gru"], help="what kind of RNN to use (default: GRU)", dest='cell_type',
@@ -365,6 +448,8 @@ if __name__ == "__main__":
                         help="size of conv output (default: 50)")
     parser.add_argument("--weight-decay", type=float, required=False, dest="weight_decay", default=0,
                         help="coefficient for penalizing l2 norm of model weights (default: 0)")
+    parser.add_argument("--grad-clipping", type=float, required=False, dest="grad_clipping",  default=-1,
+                        help="gradient clipping")
     parser.add_argument("--lr", type=float, required=False, dest="lr", default=1e-3,
                         help="learning rate for Adam optimizer (default=1e-3)")
     parser.add_argument("--batch-size", type=int, required=False, dest="batch_size", default=16,

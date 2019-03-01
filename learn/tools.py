@@ -28,11 +28,11 @@ def pick_model(args, dicts):
                                   args.bidirectional)
     elif args.model == "cnn_vanilla":
         filter_size = int(args.filter_size)
-        model = models.VanillaConv(Y, args.embed_file, filter_size, args.num_filter_maps, args.gpu, dicts, args.embed_size, args.dropout)
+        model = models.VanillaConv(Y, args.embed_file, filter_size, args.num_filter_maps, args.gpu, dicts, args.embed_size, args.dropout, embedding=args.embedding)
     elif args.model == "conv_attn":
         filter_size = int(args.filter_size)
         model = models.ConvAttnPool(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
-                                    embed_size=args.embed_size, dropout=args.dropout)
+                                    embed_size=args.embed_size, dropout=args.dropout, embedding=args.embedding)
     elif args.model == "tcn":
         filter_size = int(args.filter_size)
         model = models.VanillaTCN(Y, args.embed_file, filter_size, args.num_filter_maps, args.tcn_layers, args.gpu, dicts, args.embed_size, 
@@ -42,9 +42,11 @@ def pick_model(args, dicts):
         model.load_state_dict(sd)
     if args.gpu:
         model.cuda()
-        if torch.cuda.device_count() > 1:
-            print("Let's use", torch.cuda.device_count(), "GPUs!")
-            model = nn.DataParallel(model)
+        # if torch.cuda.device_count() > 1:
+        #     print("Let's use", torch.cuda.device_count(), "GPUs!")
+        #     for i in range(torch.cuda.device_count()):
+        #         torch.tensor(1).cuda(i)
+        #     model = nn.DataParallel(model)
     return model
 
 def make_param_dict(args):

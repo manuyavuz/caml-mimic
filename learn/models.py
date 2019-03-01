@@ -23,7 +23,7 @@ from dataproc import extract_wvs
 
 class BaseModel(nn.Module):
 
-    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=True, embed_size=128):
+    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=True, embed_size=128, embedding='default'):
         super(BaseModel, self).__init__()
         torch.manual_seed(1337)
         self.gpu = gpu
@@ -31,18 +31,38 @@ class BaseModel(nn.Module):
         self.embed_size = embed_size
         self.embed_drop = nn.Dropout(p=dropout)
         self.lmbda = lmbda
+        self.embedding = embedding
 
         #make embedding layer
-        if embed_file:
-            print("loading pretrained embeddings...")
-            W = torch.Tensor(extract_wvs.load_embeddings(embed_file))
+        if self.embedding == 'elmo':
+            options_file = "/home/lily/zl379/Playing/bilm-tf/mmc_new/options.json"
+            weight_file = "/home/lily/zl379/Playing/bilm-tf/dump/weights.hdf5"
 
-            self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
-            self.embed.weight.data = W.clone()
+            w2ind = dicts['w2ind']
+            vocab = list(sorted(w2ind.keys(), key=w2ind.get))
+            #add UNK and PAD
+            vocab.insert(0, 'PAD')
+            vocab.append('UNK')
+            self.embed = Elmo(options_file, weight_file, 2, dropout=0, vocab_to_cache=vocab, requires_grad=False)
+
+        elif self.embedding == 'bert':
+            bert_folder = "/data/corpora/mimic/experiments/pytorch-pretrained-BERT/pubmed_pmc_470k"
+            self.embed = BertModel.from_pretrained(bert_folder)
+            for params in self.embed.parameters():
+                params.requires_grad = False
         else:
-            #add 2 to include UNK and PAD
-            vocab_size = len(dicts['ind2w'])
-            self.embed = nn.Embedding(vocab_size+2, embed_size, padding_idx=0)
+            if embed_file:
+                print("loading pretrained embeddings...")
+                W = torch.Tensor(extract_wvs.load_embeddings(embed_file))
+
+                self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
+                for params in self.embed.parameters():
+                    params.requires_grad = False
+                self.embed.weight.data = W.clone()
+            else:
+                #add 2 to include UNK and PAD
+                vocab_size = len(dicts['ind2w'])
+                self.embed = nn.Embedding(vocab_size+2, embed_size, padding_idx=0)
             
 
     def _get_loss(self, yhat, target, diffs=None):
@@ -54,6 +74,24 @@ class BaseModel(nn.Module):
             diff = torch.stack(diffs).mean()
             loss = loss + diff
         return loss
+
+    def get_embedding(self, input):
+        if self.embedding == 'elmo':
+            embedding = []
+            chunk_size = 256
+            for i in range(0, max(1,input.size(1)//chunk_size)):
+                chunk_input = input[:, i*chunk_size:chunk_size+i*chunk_size]
+                i_embedding = self.embed(chunk_input, chunk_input)['elmo_representations'][-1]
+                embedding.append(i_embedding)
+            return torch.cat(embedding, 1)
+        elif self.embedding == 'bert':
+            embedding = []
+            for i in range(0, max(1,input.size(1)//256)):
+                i_embedding, _ = self.embed(input[:, i*256:256+i*256], output_all_encoded_layers=False)
+                embedding.append(i_embedding)
+            return torch.cat(embedding, 1)
+        else:
+            return self.embed(input)
 
     def embed_descriptions(self, desc_data, gpu):
         #label description embedding via convolutional layer
@@ -95,8 +133,8 @@ class BaseModel(nn.Module):
 
 class ConvAttnPool(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=64, dropout=0.5):
-        super(ConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=64, dropout=0.5, embedding='default'):
+        super(ConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size, embedding=embedding)
 
         #initialize conv layer as in 2.1
         self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size, padding=int(floor(kernel_size/2)))
@@ -125,7 +163,7 @@ class ConvAttnPool(BaseModel):
         
     def forward(self, x, target, desc_data=None, get_attention=True):
         #get embeddings and apply dropout
-        x = self.embed(x)
+        x = self.get_embedding(x)
         x = self.embed_drop(x)
         x = x.transpose(1, 2)
 
@@ -152,10 +190,68 @@ class ConvAttnPool(BaseModel):
         return yhat, loss, alpha
 
 
+class Transformer(BaseModel):
+
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=64, dropout=0.5, embedding='default'):
+        super(VanillaConv, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size, embedding=embedding)
+        #initialize conv layer as in 2.1
+        # self.ff1 = nn.Linear(num_filter_maps, Y)
+        self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size)
+        xavier_uniform(self.conv.weight)
+
+        #linear output
+        self.fc = nn.Linear(num_filter_maps, Y)
+        xavier_uniform(self.fc.weight)
+
+    def forward(self, x, target, desc_data=None, get_attention=False):
+        x = self.get_embedding(x)
+        x = self.embed_drop(x)
+        x = x.transpose(1, 2)
+
+        #conv/max-pooling
+        c = self.conv(x)
+        if get_attention:
+            #get argmax vector too
+            x, argmax = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2], return_indices=True)
+            attn = self.construct_attention(argmax, c.size()[2])
+        else:
+            x = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2])
+            attn = None
+        x = x.squeeze(dim=2)
+        #linear output
+        x = self.fc(x)
+        #final sigmoid to get predictions
+        yhat = x
+        loss = self._get_loss(yhat, target)
+        return yhat, loss, attn
+
+    def construct_attention(self, argmax, num_windows):
+        attn_batches = []
+        for argmax_i in argmax:
+            attns = []
+            for i in range(num_windows):
+                #generate mask to select indices of conv features where max was i
+                mask = (argmax_i == i).repeat(1,self.Y).t()
+                #apply mask to every label's weight vector and take the sum to get the 'attention' score
+                weights = self.fc.weight[mask].view(-1,self.Y)
+                if len(weights.size()) > 0:
+                    window_attns = weights.sum(dim=0)
+                    attns.append(window_attns)
+                else:
+                    #this window was never a max
+                    attns.append(Variable(torch.zeros(self.Y)).cuda())
+            #combine
+            attn = torch.stack(attns)
+            attn_batches.append(attn)
+        attn_full = torch.stack(attn_batches)
+        #put it in the right form for passing to interpret
+        attn_full = attn_full.transpose(1,2)
+        return attn_full
+
 class VanillaConv(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=64, dropout=0.5):
-        super(VanillaConv, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size) 
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=64, dropout=0.5, embedding='default'):
+        super(VanillaConv, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size, embedding=embedding) 
         #initialize conv layer as in 2.1
         self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size)
         xavier_uniform(self.conv.weight)
@@ -165,17 +261,11 @@ class VanillaConv(BaseModel):
         xavier_uniform(self.fc.weight)
 
     def forward(self, x, target, desc_data=None, get_attention=False):
-        print('=====')
-        print(x.shape)
-        #embed
-        x = self.embed(x)
+        x = self.get_embedding(x)
         x = self.embed_drop(x)
         x = x.transpose(1, 2)
-        print(x.shape)
-
         #conv/max-pooling
         c = self.conv(x)
-        print(c.shape)
         if get_attention:
             #get argmax vector too
             x, argmax = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2], return_indices=True)
@@ -183,12 +273,9 @@ class VanillaConv(BaseModel):
         else:
             x = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2])
             attn = None
-        print(x.shape)
         x = x.squeeze(dim=2)
-        print(x.shape)
         #linear output
         x = self.fc(x)
-        print(x.shape)
         #final sigmoid to get predictions
         yhat = x
         loss = self._get_loss(yhat, target)
@@ -334,19 +421,16 @@ class TemporalBlock(nn.Module):
 
 
 class TemporalConvNet(nn.Module):
-    def __init__(self, num_inputs, num_channels, kernel_size=2, dropout=0.2):
+    def __init__(self, num_inputs, num_channels, kernel_size=2, dropout=0.2, dilations=None):
         super(TemporalConvNet, self).__init__()
         layers = []
         num_levels = len(num_channels)
-        print(num_channels)
-        print(num_levels)
-        for i in range(num_levels):
-            dilation_size = 2 ** i
+        for i in range(num_levels): 
+            dilation_size = 2 ** i if dilations is None else dilations[i]
             in_channels = num_inputs if i == 0 else num_channels[i-1]
             out_channels = num_channels[i]
             layers += [TemporalBlock(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
                                      padding=(kernel_size-1) * dilation_size, dropout=dropout)]
-
         self.network = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -356,61 +440,32 @@ class VanillaTCN(BaseModel):
 
     def __init__(self, Y, embed_file, kernel_size, num_filter_maps, num_layers, gpu=True, dicts=None, embed_size=64, dropout=0.5):
         super(VanillaTCN, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size)
-        # torch.backends.cudnn.enabled = False
-        options_file = "/home/lily/zl379/Playing/bilm-tf/mmc_new/options.json"
-        weight_file = "/home/lily/zl379/Playing/bilm-tf/dump/weights.hdf5"
-        bert_folder = "/data/corpora/BioBERT/pubmed_pmc_470k"
-
-        # Compute two different representation for each token.
-        # Each representation is a linear weighted combination for the
-        # 3 layers in ELMo (i.e., charcnn, the outputs of the two BiLSTM))
-        # self.elmo_embedder = ElmoEmbedder(options_file, weight_file)
-        vocab = list(dicts['w2ind'].keys())
-        print(len(vocab))
-        self.elmo = Elmo(options_file, weight_file, 2, dropout=0.5)
-        # self.elmo = Elmo(options_file, weight_file, 2, dropout=0.5, vocab_to_cache=vocab, requires_grad=False)
-        # self.bert = BertForPreTraining.from_pretrained(bert_folder, cache_dir=None)
-
+        self.embed_drop = nn.Dropout(p=0.2)
         num_channels = [num_filter_maps] * num_layers
+        # dilations = [3] * num_layers
         self.tcn = TemporalConvNet(self.embed_size, num_channels, kernel_size=kernel_size, dropout=dropout)
 #         xavier_uniform(self.tcn.weight)
         self.linear = nn.Linear(num_filter_maps, Y)
-        self.linear_elmo = nn.Linear(self.embed_size, Y)
-        xavier_uniform(self.linear_elmo.weight)
         xavier_uniform(self.linear.weight)
 
     def forward(self, x, target, desc_data=None, get_attention=False):
-        # print("\tIn Model: input size", x.size())
         #embed
-        print('=====')
-        print(x)
-        print(x.size())
-        x = self.elmo(x, x)['elmo_representations'][-1]
+        x = self.get_embedding(x)
+        # x = self.embed_drop(x)
         x = x.transpose(1, 2)
 
-        # x = self.embed(x)
-        # x = self.embed_drop(x)
-        # x = x.transpose(1, 2)
-        # print(x.shape)
-
-        tc = x
-        # tc = self.tcn(x)  # input should have dimension (N, C, L)
-#         print(tc.shape)
+        tc = self.tcn(x)  # input should have dimension (N, C, L)
 
         x = F.max_pool1d(F.tanh(tc), kernel_size=tc.size()[2])
         x = x.squeeze(dim=2)
         # x = tc[:,:,-1]
-        # print(x.shape)
-#         print(x.shape)
-        # o = self.linear(x)
-        o = self.linear_elmo(x)
-        # print(o.shape)
+        o = self.linear(x)
+        # o = self.linear_elmo(x)
 
         
         yhat = o
         loss = self._get_loss(yhat, target)
 #         return F.log_softmax(o, dim=1), loss
-        # print("\tIn Model: output size", yhat.size())
         return yhat, loss, None
 
     def construct_attention(self, argmax, num_windows):
