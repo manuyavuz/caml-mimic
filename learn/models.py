@@ -48,8 +48,6 @@ class BaseModel(nn.Module):
         elif self.embedding == 'bert':
             bert_folder = "/data/corpora/mimic/experiments/pytorch-pretrained-BERT/pubmed_pmc_470k"
             self.embed = BertModel.from_pretrained(bert_folder)
-            for params in self.embed.parameters():
-                params.requires_grad = False
         else:
             if embed_file:
                 print("loading pretrained embeddings...")
@@ -86,8 +84,9 @@ class BaseModel(nn.Module):
             return torch.cat(embedding, 1)
         elif self.embedding == 'bert':
             embedding = []
-            for i in range(0, max(1,input.size(1)//256)):
-                i_embedding, _ = self.embed(input[:, i*256:256+i*256], output_all_encoded_layers=False)
+            chunk_size = 128
+            for i in range(0, max(1,input.size(1)//chunk_size)):
+                i_embedding, _ = self.embed(input[:, i*chunk_size:chunk_size+i*chunk_size], output_all_encoded_layers=False)
                 embedding.append(i_embedding)
             return torch.cat(embedding, 1)
         else:
@@ -438,13 +437,20 @@ class TemporalConvNet(nn.Module):
     
 class VanillaTCN(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, num_layers, gpu=True, dicts=None, embed_size=64, dropout=0.5):
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, num_layers, gpu=True, dicts=None, embed_size=64, dropout=0.5, dilations=None, use_attention=False):
         super(VanillaTCN, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size)
         self.embed_drop = nn.Dropout(p=0.2)
+        self.use_attention = use_attention
         num_channels = [num_filter_maps] * num_layers
         # dilations = [3] * num_layers
-        self.tcn = TemporalConvNet(self.embed_size, num_channels, kernel_size=kernel_size, dropout=dropout)
+        self.tcn = TemporalConvNet(self.embed_size, num_channels, kernel_size=kernel_size, dropout=dropout, dilations=dilations)
 #         xavier_uniform(self.tcn.weight)
+
+        #context vectors for computing attention as in 2.2
+
+        if self.use_attention:
+            self.U = nn.Linear(num_filter_maps, Y)
+            xavier_uniform(self.U.weight)
         self.linear = nn.Linear(num_filter_maps, Y)
         xavier_uniform(self.linear.weight)
 
@@ -456,14 +462,20 @@ class VanillaTCN(BaseModel):
 
         tc = self.tcn(x)  # input should have dimension (N, C, L)
 
-        x = F.max_pool1d(F.tanh(tc), kernel_size=tc.size()[2])
-        x = x.squeeze(dim=2)
-        # x = tc[:,:,-1]
-        o = self.linear(x)
-        # o = self.linear_elmo(x)
-
-        
-        yhat = o
+        if self.use_attention:
+            #apply convolution and nonlinearity (tanh)
+            x = F.tanh(tc.transpose(1,2))
+            #apply attention
+            alpha = F.softmax(self.U.weight.matmul(x.transpose(1,2)), dim=2)
+            #document representations are weighted sums using the attention. Can compute all at once as a matmul
+            m = alpha.matmul(x)
+            #final layer classification
+            yhat = self.linear.weight.mul(m).sum(dim=2).add(self.linear.bias)
+        else:
+            x = F.max_pool1d(F.tanh(tc), kernel_size=tc.size()[2])
+            x = x.squeeze(dim=2)
+            yhat = self.linear(x)
+            
         loss = self._get_loss(yhat, target)
 #         return F.log_softmax(o, dim=1), loss
         return yhat, loss, None

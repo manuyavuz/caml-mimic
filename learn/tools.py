@@ -18,6 +18,14 @@ import datasets
 import persistence
 import numpy as np
 
+# class MyDataParallel(nn.DataParallel):
+#     def __getattr__(self, name):
+#         module = self.__dict__.get('module')
+#         if name == 'module':
+#             return module
+#         else:            
+#             return getattr(module, name)
+
 def pick_model(args, dicts):
     """
         Use args to initialize the appropriate model
@@ -36,17 +44,17 @@ def pick_model(args, dicts):
     elif args.model == "tcn":
         filter_size = int(args.filter_size)
         model = models.VanillaTCN(Y, args.embed_file, filter_size, args.num_filter_maps, args.tcn_layers, args.gpu, dicts, args.embed_size, 
-                                   args.dropout)
+                                   args.dropout, args.tcn_dilations, args.attention)
     if args.test_model:
         sd = torch.load(args.test_model)
         model.load_state_dict(sd)
     if args.gpu:
+        model = nn.DataParallel(model)
         model.cuda()
-        # if torch.cuda.device_count() > 1:
-        #     print("Let's use", torch.cuda.device_count(), "GPUs!")
-        #     for i in range(torch.cuda.device_count()):
-        #         torch.tensor(1).cuda(i)
-        #     model = nn.DataParallel(model)
+        if torch.cuda.device_count() > 1:
+            print("Let's use", torch.cuda.device_count(), "GPUs!")
+            for i in range(torch.cuda.device_count()):
+                torch.tensor(1).cuda(i)
     return model
 
 def make_param_dict(args):

@@ -181,6 +181,9 @@ def train_epochs(args, model, optimizer, params, dicts):
     """
         Main loop. does train and test
     """
+    if args.dynamic_lr:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=args.patience, verbose=True, min_lr=0.0001)
+
     metrics_hist = defaultdict(lambda: [])
     metrics_hist_te = defaultdict(lambda: [])
     metrics_hist_tr = defaultdict(lambda: [])
@@ -214,12 +217,15 @@ def train_epochs(args, model, optimizer, params, dicts):
             break
 
         if args.criterion in metrics_hist.keys():
-            if early_stop(metrics_hist, args.criterion, args.patience):
-                #stop training, do tests on test and train sets, and then stop the script
-                print("%s hasn't improved in %d epochs, early stopping..." % (args.criterion, args.patience))
-                test_only = True
-                args.test_model = '%s/model_best_%s.pth' % (model_dir, args.criterion)
-                model = tools.pick_model(args, dicts)
+            if args.dynamic_lr:
+                scheduler.step(metrics_hist[args.criterion][-1])
+            else:
+                if early_stop(metrics_hist, args.criterion, args.patience):
+                    # stop training, do tests on test and train sets, and then stop the script
+                    print("%s hasn't improved in %d epochs, early stopping..." % (args.criterion, args.patience))
+                    test_only = True
+                    args.test_model = '%s/model_best_%s.pth' % (model_dir, args.criterion)
+                    model = tools.pick_model(args, dicts)
     return epoch+1
 
 def early_stop(metrics_hist, criterion, patience):
@@ -244,7 +250,7 @@ def one_epoch(model, optimizer, Y, epoch, n_epochs, batch_size, data_path, versi
         print("epoch loss: " + str(loss))
     else:
         loss = np.nan
-        if model.lmbda > 0:
+        if model.module.lmbda > 0:
             #still need to get unseen code inds
             print("getting set of codes not in training set")
             c2ind = dicts['c2ind']
@@ -295,8 +301,7 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
 
     ind2w, w2ind, ind2c, c2ind = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind']
     unseen_code_inds = set(ind2c.keys())
-    # desc_embed = model.lmbda > 0
-    desc_embed = False
+    desc_embed = model.module.lmbda > 0
     model.train()
     generator = get_data_loader(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed, embedding=args.embedding)
     for batch_idx, tup in tqdm(enumerate(generator)):
@@ -313,7 +318,7 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
             desc_data = descs
         else:
             desc_data = None
-        output, loss, _ = model(data, target, desc_data=desc_data)
+        output, loss, _ = model(data, target)
 
         # print("Outside: input size", data.size(), "output_size", output.size())
 
@@ -338,10 +343,10 @@ def unseen_code_vecs(model, code_inds, dicts, gpu):
     code_vecs = tools.build_code_vecs(code_inds, dicts)
     code_inds, vecs = code_vecs
     #wrap it in an array so it's 3d
-    desc_embeddings = model.embed_descriptions([vecs], gpu)[0]
+    desc_embeddings = model.module.embed_descriptions([vecs], gpu)[0]
     #replace relevant final_layer weights with desc embeddings 
-    model.final.weight.data[code_inds, :] = desc_embeddings.data
-    model.final.bias.data[code_inds] = 0
+    model.module.final.weight.data[code_inds, :] = desc_embeddings.data
+    model.module.final.bias.data[code_inds] = 0
 
 def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, samples, model_dir, testing):
     """
@@ -356,12 +361,12 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
     if samples:
         tp_file = open('%s/tp_%s_examples_%d.txt' % (model_dir, fold, epoch), 'w')
         fp_file = open('%s/fp_%s_examples_%d.txt' % (model_dir, fold, epoch), 'w')
-        window_size = model.conv.weight.data.size()[2]
+        window_size = model.module.conv.weight.data.size()[2]
 
     y, yhat, yhat_raw, hids, losses = [], [], [], [], []
     ind2w, w2ind, ind2c, c2ind = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind']
 
-    desc_embed = model.lmbda > 0
+    desc_embed = model.module.lmbda > 0
     if desc_embed and len(code_inds) > 0:
         unseen_code_vecs(model, code_inds, dicts, gpu)
 
@@ -383,7 +388,7 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
 
         #get an attention sample for 2% of batches
         get_attn = samples and (np.random.rand() < 0.02 or (fold == 'test' and testing))
-        output, loss, alpha = model(data, target, desc_data=desc_data, get_attention=get_attn)
+        output, loss, alpha = model(data, target)
 
         output = F.sigmoid(output)
         output = output.data.cpu().numpy()
@@ -440,6 +445,12 @@ if __name__ == "__main__":
                         help="number of layers for RNN models (default: 1)")
     parser.add_argument("--tcn-layers", type=int, required=False, dest="tcn_layers", default=1,
                         help="number of layers for TCN models (default: 1)")
+    parser.add_argument("--tcn-dilations", nargs='+', type=int, required=False, dest="tcn_dilations", default=None,
+                        help="dilations for layers of TCN models (default: 2**l)")
+    parser.add_argument("--attention", dest="attention", action="store_const", required=False, const=True,
+                        help="optional flag to make using attention before class outputs")
+    parser.add_argument("--dynamic_lr", dest="dynamic_lr", action="store_const", required=False, const=True,
+                        help="optional flag to reduce learning rate when validation metric plateaus")
     parser.add_argument("--embed-size", type=int, required=False, dest="embed_size", default=100,
                         help="size of embedding dimension. (default: 100)")
     parser.add_argument("--filter-size", type=str, required=False, dest="filter_size", default=4,
