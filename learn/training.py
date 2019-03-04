@@ -38,7 +38,7 @@ def get_data_loader(data_path, dicts, batch_size, num_labels, version=None, desc
         dataset = BERTDataset(data_path, dicts, num_labels)
         return DataLoader(dataset, batch_size=batch_size, num_workers=1, collate_fn=collate_fn)
     else:
-        return datasets.data_generator(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
+        return datasets.data_generator(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed, no_truncate=args.no_truncate, use_hierarchy=args.use_hierarchy)
 
 def collate_fn(data):
     def merge(sequences):
@@ -164,7 +164,6 @@ def init(args):
     desc_embed = args.lmbda > 0
     print("loading lookups...")
     dicts = datasets.load_lookups(args, desc_embed=desc_embed)
-
     model = tools.pick_model(args, dicts)
     print(model)
 
@@ -181,8 +180,8 @@ def train_epochs(args, model, optimizer, params, dicts):
     """
         Main loop. does train and test
     """
-    if args.dynamic_lr:
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=args.patience, verbose=True, min_lr=0.0001)
+    if optimizer and args.dynamic_lr != -1:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, cooldown=10, patience=args.dynamic_lr, verbose=True, min_lr=0.0001)
 
     metrics_hist = defaultdict(lambda: [])
     metrics_hist_te = defaultdict(lambda: [])
@@ -217,15 +216,15 @@ def train_epochs(args, model, optimizer, params, dicts):
             break
 
         if args.criterion in metrics_hist.keys():
-            if args.dynamic_lr:
+            if early_stop(metrics_hist, args.criterion, args.patience):
+                # stop training, do tests on test and train sets, and then stop the script
+                print("%s hasn't improved in %d epochs, early stopping..." % (args.criterion, args.patience))
+                test_only = True
+                args.test_model = '%s/model_best_%s.pth' % (model_dir, args.criterion)
+                model = tools.pick_model(args, dicts)
+            if args.dynamic_lr != -1:
                 scheduler.step(metrics_hist[args.criterion][-1])
-            else:
-                if early_stop(metrics_hist, args.criterion, args.patience):
-                    # stop training, do tests on test and train sets, and then stop the script
-                    print("%s hasn't improved in %d epochs, early stopping..." % (args.criterion, args.patience))
-                    test_only = True
-                    args.test_model = '%s/model_best_%s.pth' % (model_dir, args.criterion)
-                    model = tools.pick_model(args, dicts)
+
     return epoch+1
 
 def early_stop(metrics_hist, criterion, patience):
@@ -355,7 +354,6 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
     """
     filename = data_path.replace('train', fold)
     print('file for evaluation: %s' % filename)
-    num_labels = len(dicts['ind2c'])
 
     #initialize stuff for saving attention samples
     if samples:
@@ -365,6 +363,7 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
 
     y, yhat, yhat_raw, hids, losses = [], [], [], [], []
     ind2w, w2ind, ind2c, c2ind = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind']
+    num_labels = len(ind2c)
 
     desc_embed = model.module.lmbda > 0
     if desc_embed and len(code_inds) > 0:
@@ -416,7 +415,7 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
     #write the predictions
     preds_file = persistence.write_preds(yhat, model_dir, hids, fold, ind2c, yhat_raw)
     #get metrics
-    k = 5 if num_labels == 50 else [8,15]
+    k = 5 if Y == '50' else [8,15]
     metrics = evaluation.all_metrics(yhat, y, k=k, yhat_raw=yhat_raw)
     evaluation.print_metrics(metrics)
     metrics['loss_%s' % fold] = np.mean(losses)
@@ -449,8 +448,12 @@ if __name__ == "__main__":
                         help="dilations for layers of TCN models (default: 2**l)")
     parser.add_argument("--attention", dest="attention", action="store_const", required=False, const=True,
                         help="optional flag to make using attention before class outputs")
-    parser.add_argument("--dynamic_lr", dest="dynamic_lr", action="store_const", required=False, const=True,
-                        help="optional flag to reduce learning rate when validation metric plateaus")
+    parser.add_argument("--no-truncate", dest="no_truncate", action="store_const", required=False, const=True,
+                        help="optional flag to disable input truncation")
+    parser.add_argument("--use-hierarchy", dest="use_hierarchy", action="store_const", required=False, const=True,
+                        help="optional flag to use hierarchical labels")
+    parser.add_argument("--dynamic-lr", dest="dynamic_lr", type=int, default=-1, required=False,
+                        help="how many epochs to wait for dynamic learning rate updates. (default: -1 (no dynamism))")
     parser.add_argument("--embed-size", type=int, required=False, dest="embed_size", default=100,
                         help="size of embedding dimension. (default: 100)")
     parser.add_argument("--filter-size", type=str, required=False, dest="filter_size", default=4,
