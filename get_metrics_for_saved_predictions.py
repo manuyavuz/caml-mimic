@@ -21,6 +21,7 @@ if len(sys.argv) < 2:
     sys.exit(0)
 
 model_dir = sys.argv[1]
+use_hierarchy = sys.argv[2] == '--use-hierarchy'
 dset = model_dir[model_dir.index('mimic'):]
 parts = dset.split('_')
 
@@ -30,10 +31,10 @@ data_dir = MIMIC_2_DIR if version == 'mimic2' else MIMIC_3_DIR
 train_file = '%s/train.csv' % data_dir if version == 'mimic2' else '%s/train_%s.csv' % (data_dir, str(Y))
 test_file = '%s/test.csv' % data_dir if version == 'mimic2' else '%s/test_%s.csv' % (data_dir, str(Y))
 
-ind2c, _ = datasets.load_full_codes(train_file, version=version)
+ind2c, _ = datasets.load_full_codes(train_file, version=version, use_hierarchy=use_hierarchy)
 c2ind = {c:i for i,c in ind2c.items()}
 num_labels = len(ind2c)
-
+print(num_labels)
 preds = defaultdict(lambda: [])
             
 print("loading predictions")
@@ -42,8 +43,13 @@ with open('%s/preds_test.psv' % model_dir, 'r') as f:
     for row in r:
         if len(row) > 1:
             try:
-                preds[row[0]] = set([c2ind[c] for c in row[1:] if c != ''])
+                labels = set()
+                for c in row[1:]:
+                    if c != '' and c in c2ind:
+                        labels.add(c2ind[c])
+                preds[row[0]] = labels
             except:
+                print('fail!!')
                 import pdb; pdb.set_trace()
         else:
             preds[row[0]] = set([])
@@ -55,7 +61,10 @@ with open(test_file, 'r') as f:
     #header
     next(r)
     for row in r:
-        codes = set([c2ind[c] for c in row[3].split(';')])
+        code_list = row[3].split(';')
+        if use_hierarchy:
+            code_list = datasets.get_hierarchy_of_codes(code_list)
+        codes = set([c2ind[c] for c in code_list])
         golds[row[1]] = codes
 
 have_scores = os.path.exists('%s/pred_scores_test.json' % model_dir)
@@ -70,7 +79,7 @@ if have_scores:
 else:
     yhat_raw = None
 y = np.zeros((len(hadm_ids), num_labels))
-   
+print(have_scores)
 print("reformatting predictions")
 for i,hadm_id in tqdm(enumerate(hadm_ids)):
     yhat_inds = [1 if j in preds[hadm_id] else 0 for j in range(num_labels)]
