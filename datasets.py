@@ -8,19 +8,23 @@ import numpy as np
 import sys
 
 from constants import *
+from icd9 import icd9
+import pandas as pd
 
 class Batch:
     """
         This class and the data_generator could probably be replaced with a PyTorch DataLoader
     """
-    def __init__(self, desc_embed):
+    def __init__(self, desc_embed, no_truncate=False, use_hierarchy=False):
         self.docs = []
         self.labels = []
         self.hadm_ids = []
         self.code_set = set()
         self.length = 0
-        self.max_length = MAX_LENGTH
+        self.max_length = MAX_LENGTH if not no_truncate else 1000000
+        self.no_truncate = no_truncate
         self.desc_embed = desc_embed
+        self.use_hierarchy = use_hierarchy
         self.descs = []
 
     def add_instance(self, row, ind2c, c2ind, w2ind, dv_dict, num_labels):
@@ -36,7 +40,10 @@ class Batch:
         labelled = False
         desc_vecs = []
         #get codes as a multi-hot vector
-        for l in row[3].split(';'):
+        label_list = set(row[3].split(';'))
+        if self.use_hierarchy:
+            label_list = get_hierarchy_of_codes(label_list)
+        for l in label_list:
             if l in c2ind.keys():
                 code = int(c2ind[l])
                 labels_idx[code] = 1
@@ -91,7 +98,7 @@ def pad_desc_vecs(desc_vecs):
         pad_vecs.append(vec)
     return pad_vecs
 
-def data_generator(filename, dicts, batch_size, num_labels, desc_embed=False, version='mimic3'):
+def data_generator(filename, dicts, batch_size, num_labels, desc_embed=False, version='mimic3', no_truncate=False, use_hierarchy=False):
     """
         Inputs:
             filename: holds data sorted by sequence length, for best batching
@@ -104,18 +111,19 @@ def data_generator(filename, dicts, batch_size, num_labels, desc_embed=False, ve
             np arrays with data for training loop.
     """
     ind2w, w2ind, ind2c, c2ind, dv_dict = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind'], dicts['dv']
+    num_labels = len(ind2c)
     with open(filename, 'r') as infile:
         r = csv.reader(infile)
         #header
         next(r)
-        cur_inst = Batch(desc_embed)
+        cur_inst = Batch(desc_embed, no_truncate, use_hierarchy)
         for row in r:
             #find the next `batch_size` instances
             if len(cur_inst.docs) == batch_size:
                 cur_inst.pad_docs()
                 yield cur_inst.to_ret()
                 #clear
-                cur_inst = Batch(desc_embed)
+                cur_inst = Batch(desc_embed, no_truncate, use_hierarchy)
             cur_inst.add_instance(row, ind2c, c2ind, w2ind, dv_dict, num_labels)
         cur_inst.pad_docs()
         yield cur_inst.to_ret()
@@ -149,13 +157,15 @@ def load_lookups(args, desc_embed=False):
 
     #get code and description lookups
     if args.Y == 'full':
-        ind2c, desc_dict = load_full_codes(args.data_path, version=args.version)
+        ind2c, desc_dict = load_full_codes(args.data_path, version=args.version, use_hierarchy=args.use_hierarchy)
     else:
         codes = set()
         with open("%s/TOP_%s_CODES.csv" % (MIMIC_3_DIR, str(args.Y)), 'r') as labelfile:
             lr = csv.reader(labelfile)
             for i,row in enumerate(lr):
                 codes.add(row[0])
+            if args.use_hierarchy:
+                codes = get_hierarchy_of_codes(codes)
         ind2c = {i:c for i,c in enumerate(sorted(codes))}
         desc_dict = load_code_descriptions()
     c2ind = {c:i for i,c in ind2c.items()}
@@ -169,7 +179,7 @@ def load_lookups(args, desc_embed=False):
     dicts = {'ind2w': ind2w, 'w2ind': w2ind, 'ind2c': ind2c, 'c2ind': c2ind, 'desc': desc_dict, 'dv': dv_dict}
     return dicts
 
-def load_full_codes(train_path, version='mimic3'):
+def load_full_codes(train_path, version='mimic3', use_hierarchy=False):
     """
         Inputs:
             train_path: path to train dataset
@@ -201,6 +211,8 @@ def load_full_codes(train_path, version='mimic3'):
                     for code in row[3].split(';'):
                         codes.add(code)
         codes = set([c for c in codes if c != ''])
+        if use_hierarchy:
+            codes = get_hierarchy_of_codes(codes)
         ind2c = defaultdict(str, {i:c for i,c in enumerate(sorted(codes))})
     return ind2c, desc_dict
 
@@ -274,3 +286,30 @@ def load_description_vectors(Y, version='mimic3'):
             vec = [int(x) for x in row[1:]]
             dv_dict[code] = vec
     return dv_dict
+
+def get_hierarchy_of_codes(codes):
+    func = get_hierarchy_of_codes
+    if not hasattr(func, "code_set"):
+        func.code_set = set()
+        with open('%s/ICD9_descriptions' % DATA_DIR, 'r') as labelfile:
+            for i,row in enumerate(labelfile):
+                func.code_set.add(row.rstrip().split()[0])
+        func.code_ranges = []
+        for c in func.code_set:
+            ranges = c.split('.')[0].split('-')
+            if len(ranges) == 2:
+                func.code_ranges.append(ranges)        
+    hier = set(codes)
+    codes_before_point = set()
+    for code in codes:
+        while '.' in code:
+            code = code[:-1]
+            if code in func.code_set:
+                hier.add(code)
+        codes_before_point.add(code)
+    for r in func.code_ranges:
+        for code in codes_before_point:
+            if len(code) == len(r[0]) and code >= r[0] and code <= r[1]:
+                hier.add('-'.join(r))
+                break
+    return hier
