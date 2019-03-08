@@ -36,11 +36,11 @@ def pick_model(args, dicts):
                                   args.bidirectional)
     elif args.model == "cnn_vanilla":
         filter_size = int(args.filter_size)
-        model = models.VanillaConv(Y, args.embed_file, filter_size, args.num_filter_maps, args.gpu, dicts, args.embed_size, args.dropout, embedding=args.embedding)
+        model = models.VanillaConv(Y, args.embed_file, filter_size, args.num_filter_maps, args.gpu, dicts, args.embed_size, args.dropout, embedding=args.embedding, tune_embeddings=args.tune_embeddings)
     elif args.model == "conv_attn":
         filter_size = int(args.filter_size)
         model = models.ConvAttnPool(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
-                                    embed_size=args.embed_size, dropout=args.dropout, embedding=args.embedding)
+                                    embed_size=args.embed_size, dropout=args.dropout, embedding=args.embedding, tune_embeddings=args.tune_embeddings)
     elif args.model == "tcn":
         filter_size = int(args.filter_size)
         model = models.VanillaTCN(Y, args.embed_file, filter_size, args.num_filter_maps, args.tcn_layers, args.gpu, dicts, args.embed_size, 

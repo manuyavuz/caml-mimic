@@ -306,8 +306,8 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
     for batch_idx, tup in tqdm(enumerate(generator)):
         data, target, _, code_set, descs = tup
         data, target = Variable(torch.LongTensor(data)), Variable(torch.FloatTensor(target))
-        # code_set = set(code_set)
-        # unseen_code_inds = unseen_code_inds.difference(code_set)
+        code_set = set(code_set)
+        unseen_code_inds = unseen_code_inds.difference(code_set)
         if gpu:
             data = data.cuda()
             target = target.cuda()
@@ -452,6 +452,8 @@ if __name__ == "__main__":
                         help="optional flag to disable input truncation")
     parser.add_argument("--use-hierarchy", dest="use_hierarchy", action="store_const", required=False, const=True,
                         help="optional flag to use hierarchical labels")
+    parser.add_argument("--tune-embeddings", dest="tune_embeddings", action="store_const", required=False, const=True,
+                        help="optional flag to use hierarchical labels")
     parser.add_argument("--dynamic-lr", dest="dynamic_lr", type=int, default=-1, required=False,
                         help="how many epochs to wait for dynamic learning rate updates. (default: -1 (no dynamism))")
     parser.add_argument("--embed-size", type=int, required=False, dest="embed_size", default=100,
@@ -493,4 +495,3 @@ if __name__ == "__main__":
     command = ' '.join(['python'] + sys.argv)
     args.command = command
     main(args)
-

@@ -23,7 +23,7 @@ from dataproc import extract_wvs
 
 class BaseModel(nn.Module):
 
-    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=True, embed_size=128, embedding='default'):
+    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=True, embed_size=128, embedding='default', tune_embeddings=False):
         super(BaseModel, self).__init__()
         torch.manual_seed(1337)
         self.gpu = gpu
@@ -32,6 +32,7 @@ class BaseModel(nn.Module):
         self.embed_drop = nn.Dropout(p=dropout)
         self.lmbda = lmbda
         self.embedding = embedding
+        self.tune_embeddings = tune_embeddings
 
         #make embedding layer
         if self.embedding == 'elmo':
@@ -54,8 +55,9 @@ class BaseModel(nn.Module):
                 W = torch.Tensor(extract_wvs.load_embeddings(embed_file))
 
                 self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
-                for params in self.embed.parameters():
-                    params.requires_grad = False
+                if self.tune_embeddings:
+                    for params in self.embed.parameters():
+                        params.requires_grad = False
                 self.embed.weight.data = W.clone()
             else:
                 #add 2 to include UNK and PAD
@@ -132,8 +134,8 @@ class BaseModel(nn.Module):
 
 class ConvAttnPool(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=64, dropout=0.5, embedding='default'):
-        super(ConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size, embedding=embedding)
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=64, dropout=0.5, embedding='default', tune_embeddings=False):
+        super(ConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size, embedding=embedding, tune_embeddings=tune_embeddings)
 
         #initialize conv layer as in 2.1
         self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size, padding=int(floor(kernel_size/2)))
@@ -249,8 +251,8 @@ class Transformer(BaseModel):
 
 class VanillaConv(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=64, dropout=0.5, embedding='default'):
-        super(VanillaConv, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size, embedding=embedding) 
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=64, dropout=0.5, embedding='default', tune_embeddings=False):
+        super(VanillaConv, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size, embedding=embedding, tune_embeddings=tune_embeddings) 
         #initialize conv layer as in 2.1
         self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size)
         xavier_uniform(self.conv.weight)
