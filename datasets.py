@@ -8,7 +8,6 @@ import numpy as np
 import sys
 
 from constants import *
-from icd9 import icd9
 import pandas as pd
 
 class Batch:
