@@ -21,7 +21,7 @@ if len(sys.argv) < 2:
     sys.exit(0)
 
 model_dir = sys.argv[1]
-use_hierarchy = sys.argv[2] == '--use-hierarchy'
+use_hierarchy = sys.argv[2] == '--use-hierarchy' if len(sys.argv) > 2 else False
 dset = model_dir[model_dir.index('mimic'):]
 parts = dset.split('_')
 
