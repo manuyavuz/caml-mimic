@@ -505,3 +505,77 @@ class VanillaTCN(BaseModel):
         attn_full = attn_full.transpose(1,2)
         return attn_full
 
+
+# class HierarchicalAttentionTCN(BaseModel):
+
+#     def __init__(self, Y, embed_file, kernel_size, num_filter_maps, num_layers, gpu=True, dicts=None, embed_size=64, dropout=0.5, dilations=None):
+#         super(HierarchicalAttentionTCN, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size)
+#         self.embed_drop = nn.Dropout(p=0.2)
+#         num_channels = [num_filter_maps] * num_layers
+#         # dilations = [3] * num_layers
+#         self.tcn = TemporalConvNet(self.embed_size, num_channels, kernel_size=kernel_size, dropout=dropout, dilations=dilations)
+# #         xavier_uniform(self.tcn.weight)
+
+#         #context vectors for computing attention as in 2.2
+#         self.U = nn.ModuleList()
+#         self.linear = nn.ModuleList()
+#         for y in Y:
+#             if self.use_attention:
+#                 U = nn.Linear(num_filter_maps, y)
+#                 xavier_uniform(U.weight)
+#                 self.U.append(U)
+#             linear = nn.Linear(num_filter_maps, y)
+#             xavier_uniform(linear.weight)
+#             self.linear.append(linear)
+
+#     def forward(self, x, target, desc_data=None, get_attention=False):
+#         #embed
+#         x = self.get_embedding(x)
+#         # x = self.embed_drop(x)
+#         x = x.transpose(1, 2)
+
+#         tc = self.tcn(x)  # input should have dimension (N, C, L)
+
+#         if self.use_attention:
+#             #apply convolution and nonlinearity (tanh)
+#             x = F.tanh(tc.transpose(1,2))
+#             for y in Y:
+#                 # U = self.U[]
+#                 #apply attention
+#                 alpha = F.softmax(self.U.weight.matmul(x.transpose(1,2)), dim=2)
+#                 #document representations are weighted sums using the attention. Can compute all at once as a matmul
+#                 m = alpha.matmul(x)
+#                 #final layer classification
+#                 yhat = self.linear.weight.mul(m).sum(dim=2).add(self.linear.bias)
+#         else:
+#             x = F.max_pool1d(F.tanh(tc), kernel_size=tc.size()[2])
+#             x = x.squeeze(dim=2)
+#             yhat = self.linear(x)
+            
+#         loss = self._get_loss(yhat, target)
+# #         return F.log_softmax(o, dim=1), loss
+#         return yhat, loss, None
+
+#     def construct_attention(self, argmax, num_windows):
+#         attn_batches = []
+#         for argmax_i in argmax:
+#             attns = []
+#             for i in range(num_windows):
+#                 #generate mask to select indices of conv features where max was i
+#                 mask = (argmax_i == i).repeat(1,self.Y).t()
+#                 #apply mask to every label's weight vector and take the sum to get the 'attention' score
+#                 weights = self.fc.weight[mask].view(-1,self.Y)
+#                 if len(weights.size()) > 0:
+#                     window_attns = weights.sum(dim=0)
+#                     attns.append(window_attns)
+#                 else:
+#                     #this window was never a max
+#                     attns.append(Variable(torch.zeros(self.Y)).cuda())
+#             #combine
+#             attn = torch.stack(attns)
+#             attn_batches.append(attn)
+#         attn_full = torch.stack(attn_batches)
+#         #put it in the right form for passing to interpret
+#         attn_full = attn_full.transpose(1,2)
+#         return attn_full
+
