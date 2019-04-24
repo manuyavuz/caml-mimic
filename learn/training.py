@@ -276,6 +276,9 @@ def one_epoch(model, optimizer, Y, epoch, n_epochs, batch_size, data_path, versi
     metrics = test(model, Y, epoch, data_path, fold, gpu, version, unseen_code_inds, dicts, samples, model_dir,
                    testing)
     if testing or epoch == n_epochs - 1:
+        print("\nevaluating on train")
+        test(model, Y, epoch, data_path, "train", gpu, version, unseen_code_inds, dicts, samples, 
+             model_dir, True)
         print("\nevaluating on test")
         metrics_te = test(model, Y, epoch, data_path, "test", gpu, version, unseen_code_inds, dicts, samples, 
                           model_dir, True)
