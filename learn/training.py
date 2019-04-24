@@ -492,5 +492,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     command = ' '.join(['python'] + sys.argv)
     args.command = command
+    print('===== ARGUMENTS =====')
+    print(args)
+    print('=====================')
     main(args)
 
