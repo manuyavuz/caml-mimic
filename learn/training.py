@@ -181,7 +181,7 @@ def train_epochs(args, model, optimizer, params, dicts):
     """
         Main loop. does train and test
     """
-    if args.dynamic_lr:
+    if optimizer and args.dynamic_lr:
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=args.patience, verbose=True, min_lr=0.0001)
 
     metrics_hist = defaultdict(lambda: [])
@@ -310,8 +310,8 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
     for batch_idx, tup in tqdm(enumerate(generator)):
         data, target, _, code_set, descs = tup
         data, target = Variable(torch.LongTensor(data)), Variable(torch.FloatTensor(target))
-        # code_set = set(code_set)
-        # unseen_code_inds = unseen_code_inds.difference(code_set)
+        code_set = set(code_set)
+        unseen_code_inds = unseen_code_inds.difference(code_set)
         if gpu:
             data = data.cuda()
             target = target.cuda()
@@ -321,9 +321,7 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
             desc_data = descs
         else:
             desc_data = None
-        output, loss, _ = model(data, target)
-
-        # print("Outside: input size", data.size(), "output_size", output.size())
+        output, loss, _ = model(data, target, desc_data=desc_data)
 
         loss.sum().backward()
         
@@ -391,14 +389,14 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
 
         #get an attention sample for 2% of batches
         get_attn = samples and (np.random.rand() < 0.02 or (fold == 'test' and testing))
-        output, loss, alpha = model(data, target)
+        output, loss, alpha = model(data, target, desc_data=desc_data, get_attention=get_attn)
 
         output = F.sigmoid(output)
         output = output.data.cpu().numpy()
         losses.append(loss.data.item())
         target_data = target.data.cpu().numpy()
         if get_attn and samples:
-            interpret.save_samples(data, output, target_data, alpha, window_size, epoch, tp_file, fp_file, dicts=dicts)
+            interpret.save_samples(data, output, target_data, alpha, window_size, tp_file, fp_file, dicts=dicts)
 
         #save predictions, target, hadm ids
         yhat_raw.append(output)
