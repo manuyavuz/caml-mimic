@@ -478,7 +478,7 @@ class VanillaTCN(BaseModel):
             
         loss = self._get_loss(yhat, target)
 #         return F.log_softmax(o, dim=1), loss
-        return yhat, loss, None
+        return yhat, loss, alpha
 
     def construct_attention(self, argmax, num_windows):
         attn_batches = []
