@@ -426,6 +426,12 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
     return metrics
 
 if __name__ == "__main__":
+
+    torch.manual_seed(1337)
+    np.random.seed(1337)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     parser = argparse.ArgumentParser(description="train a neural network on some clinical documents")
     parser.add_argument("data_path", type=str,
                         help="path to a file containing sorted train data. dev/test splits assumed to have same name format with 'train' replaced by 'dev' and 'test'")
